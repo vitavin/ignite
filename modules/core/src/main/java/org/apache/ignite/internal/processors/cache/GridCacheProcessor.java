@@ -78,6 +78,7 @@ import org.apache.ignite.internal.IgniteTransactionsEx;
 import org.apache.ignite.internal.binary.BinaryContext;
 import org.apache.ignite.internal.binary.BinaryMarshaller;
 import org.apache.ignite.internal.binary.GridBinaryMarshaller;
+import org.apache.ignite.internal.cache.transform.CacheObjectTransformerManager;
 import org.apache.ignite.internal.cluster.ClusterTopologyCheckedException;
 import org.apache.ignite.internal.cluster.DetachedClusterNode;
 import org.apache.ignite.internal.managers.communication.GridIoPolicy;
@@ -2073,6 +2074,12 @@ public class GridCacheProcessor extends GridProcessorAdapter {
 
         cacheContext.finishRecovery(cacheStartVer, updatedDescriptor);
 
+        if (isNearEnabled(cacheContext)) {
+            GridDhtCacheAdapter dht = cacheContext.near().dht();
+
+            dht.context().finishRecovery(cacheStartVer, updatedDescriptor);
+        }
+
         if (cacheContext.config().getAtomicityMode() == TRANSACTIONAL_SNAPSHOT && groupContext.affinityNode())
             sharedCtx.coordinators().ensureStarted();
 
@@ -2770,9 +2777,13 @@ public class GridCacheProcessor extends GridProcessorAdapter {
                     }
 
                     for (ExchangeActions.CacheActionData action : cachesToStopByGrp.getValue()) {
+                        // Rollback tx started before gateway blocked to avoid deadlock with gateway stop.
                         context().tm().rollbackTransactionsForStoppingCache(action.descriptor().cacheId());
 
                         stopGateway(action.request());
+
+                        // Rollback tx started after gateway blocked but not stopped.
+                        context().tm().rollbackTransactionsForStoppingCache(action.descriptor().cacheId());
 
                         String cacheName = action.request().cacheName();
 
@@ -2785,6 +2796,8 @@ public class GridCacheProcessor extends GridProcessorAdapter {
                     return null;
                 }
             );
+
+            grpsToStop.forEach(g -> g.get1().prepareToStop());
 
             if (!exchActions.cacheStopRequests().isEmpty())
                 removeOffheapListenerAfterCheckpoint(grpsToStop);
@@ -3063,6 +3076,8 @@ public class GridCacheProcessor extends GridProcessorAdapter {
         if (snpMgr == null)
             snpMgr = new IgniteCacheSnapshotManager();
 
+        CacheObjectTransformerManager transMgr = ctx.plugins().createComponent(CacheObjectTransformerManager.class);
+
         GridCacheIoManager ioMgr = new GridCacheIoManager();
         CacheAffinitySharedManager topMgr = new CacheAffinitySharedManager();
         GridCacheSharedTtlCleanupManager ttl = new GridCacheSharedTtlCleanupManager();
@@ -3097,7 +3112,8 @@ public class GridCacheProcessor extends GridProcessorAdapter {
             storeSesLsnrs,
             mvccCachingMgr,
             deadlockDetectionMgr,
-            diagnosticMgr
+            diagnosticMgr,
+            transMgr
         );
     }
 
